@@ -1,5 +1,7 @@
 import type { CircleChord } from "./circleData";
 import type { CompositionStep } from "./composition";
+import { arrangementEndBeat, type HarmonySlot } from "./arrangement";
+import type { MelodyNote } from "./melody";
 import type { PlaybackSettings, SoundPreset } from "./playbackSettings";
 import { buildSmartVoicing, type Voicing } from "./voicing";
 
@@ -275,6 +277,61 @@ function scheduleChord(
   return voicing.flatMap((midi, index) => scheduleVoice(context, destination, midi, start, duration, index, settings));
 }
 
+function scheduleMelodyVoice(
+  context: AudioContext,
+  destination: AudioNode,
+  midi: number,
+  start: number,
+  duration: number,
+  velocity: number,
+  settings: PlaybackSettings
+): AudioScheduledSourceNode[] {
+  const gain = context.createGain();
+  const filter = context.createBiquadFilter();
+  const oscillator = context.createOscillator();
+  const shine = context.createOscillator();
+  const lfo = context.createOscillator();
+  const lfoGain = context.createGain();
+  const release = 0.16 + settings.reverbAmount * 0.32;
+  const end = start + duration + release + settings.reverbAmount * 0.7;
+  const peak = clampGain(0.2 * velocity);
+
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.linearRampToValueAtTime(peak, start + 0.012);
+  gain.gain.setValueAtTime(peak * 0.68, Math.max(start + 0.04, start + duration - release));
+  gain.gain.linearRampToValueAtTime(0.0001, start + duration + release);
+
+  filter.type = "lowpass";
+  filter.frequency.setValueAtTime(3200 + settings.motion * 2400, start);
+  filter.Q.setValueAtTime(0.65 + settings.motion * 0.8, start);
+  filter.connect(gain);
+  gain.connect(destination);
+
+  oscillator.type = "triangle";
+  oscillator.frequency.setValueAtTime(midiToFrequency(midi), start);
+  oscillator.detune.setValueAtTime(-2, start);
+
+  shine.type = "sine";
+  shine.frequency.setValueAtTime(midiToFrequency(midi + 12), start);
+  shine.detune.setValueAtTime(3, start);
+
+  lfo.frequency.setValueAtTime(3.2 + settings.motion * 4.2, start);
+  lfoGain.gain.setValueAtTime(settings.motion * 10, start);
+  lfo.connect(lfoGain);
+  lfoGain.connect(oscillator.detune);
+
+  oscillator.connect(filter);
+  shine.connect(filter);
+  oscillator.start(start);
+  shine.start(start);
+  lfo.start(start);
+  oscillator.stop(end);
+  shine.stop(end);
+  lfo.stop(end);
+
+  return [oscillator, shine, lfo];
+}
+
 function startPlayback(
   schedule: (context: AudioContext, destination: AudioNode, start: number) => { sources: AudioScheduledSourceNode[]; end: number },
   settings: PlaybackSettings,
@@ -377,4 +434,74 @@ export function playTimeline(steps: CompositionStep[], settings: PlaybackSetting
 
 export function playChord(chord: CircleChord, settings: PlaybackSettings): void {
   playChordPreview(chord, settings);
+}
+
+export function playMelodyNotePreview(midi: number, settings: PlaybackSettings): void {
+  startPlayback(
+    (context, destination, start) => {
+      const duration = 0.42;
+      const sources = scheduleMelodyVoice(context, destination, midi, start, duration, 0.82, settings);
+
+      return {
+        sources,
+        end: start + duration + settings.reverbAmount * 1.2 + 0.35
+      };
+    },
+    settings
+  );
+}
+
+export function playArrangement(
+  melodyNotes: MelodyNote[],
+  harmonySlots: HarmonySlot[],
+  settings: PlaybackSettings,
+  onEnded?: () => void
+): void {
+  const secondsPerBeat = 60 / settings.tempoBpm;
+
+  startPlayback(
+    (context, destination, start) => {
+      const sources: AudioScheduledSourceNode[] = [];
+
+      for (const slot of harmonySlots) {
+        if (!slot.chordId || !slot.voicingMidi) {
+          continue;
+        }
+
+        sources.push(
+          ...scheduleChord(
+            context,
+            destination,
+            slot.voicingMidi,
+            start + slot.startBeat * secondsPerBeat,
+            slot.durationBeats * secondsPerBeat,
+            settings
+          )
+        );
+      }
+
+      for (const note of melodyNotes) {
+        sources.push(
+          ...scheduleMelodyVoice(
+            context,
+            destination,
+            note.midi,
+            start + note.startBeat * secondsPerBeat,
+            note.durationBeats * secondsPerBeat,
+            note.velocity,
+            settings
+          )
+        );
+      }
+
+      const endBeat = arrangementEndBeat(melodyNotes, harmonySlots);
+
+      return {
+        sources,
+        end: start + endBeat * secondsPerBeat + settings.reverbAmount * 2 + 0.5
+      };
+    },
+    settings,
+    onEnded
+  );
 }
