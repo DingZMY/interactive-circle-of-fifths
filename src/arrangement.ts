@@ -8,18 +8,20 @@ import { melodyEndBeat, type MelodyNote } from "./melody";
 import type { PlaybackSettings } from "./playbackSettings";
 import { buildSmartVoicing, type Voicing } from "./voicing";
 
-export type HarmonyGridBeats = 1 | 2 | 4;
+export type TimeSignature = "4/4" | "3/4";
+export type HarmonyGridBeats = 1 | 2 | "bar";
 
 export interface HarmonySlot {
   id: string;
   startBeat: number;
-  durationBeats: HarmonyGridBeats;
+  durationBeats: number;
   chordId: string | null;
   voicingMidi: Voicing | null;
 }
 
 export interface ArrangementState {
   gridBeats: HarmonyGridBeats;
+  timeSignature: TimeSignature;
   harmonySlots: HarmonySlot[];
 }
 
@@ -39,13 +41,27 @@ export type ArrangementPlaybackEvent =
 
 export const ARRANGEMENT_STORAGE_KEY = "interactive-circle-of-fifths.arrangement.v1";
 export const DEFAULT_HARMONY_GRID_BEATS: HarmonyGridBeats = 2;
+export const DEFAULT_TIME_SIGNATURE: TimeSignature = "4/4";
+export const TIME_SIGNATURES: TimeSignature[] = ["4/4", "3/4"];
 
 function makeSlotId(startBeat: number, durationBeats: number): string {
   return `slot-${startBeat}-${durationBeats}`;
 }
 
-function isHarmonyGridBeats(value: unknown): value is HarmonyGridBeats {
-  return value === 1 || value === 2 || value === 4;
+function parseHarmonyGridBeats(value: unknown): HarmonyGridBeats {
+  if (value === 1 || value === 2 || value === "bar") {
+    return value;
+  }
+
+  if (value === 4) {
+    return "bar";
+  }
+
+  return DEFAULT_HARMONY_GRID_BEATS;
+}
+
+function parseTimeSignature(value: unknown): TimeSignature {
+  return value === "3/4" || value === "4/4" ? value : DEFAULT_TIME_SIGNATURE;
 }
 
 function isVoicing(value: unknown): value is Voicing {
@@ -56,8 +72,27 @@ function isVoicing(value: unknown): value is Voicing {
   );
 }
 
-function slotCountForLength(lengthBeats: number, gridBeats: HarmonyGridBeats): number {
-  return Math.max(1, Math.ceil(Math.max(lengthBeats, gridBeats) / gridBeats));
+export function beatsPerBar(timeSignature: TimeSignature): number {
+  return timeSignature === "3/4" ? 3 : 4;
+}
+
+export function gridDurationBeats(gridBeats: HarmonyGridBeats, timeSignature: TimeSignature): number {
+  return gridBeats === "bar" ? beatsPerBar(timeSignature) : gridBeats;
+}
+
+export function measureLineBeats(totalBeats: number, timeSignature: TimeSignature): number[] {
+  const barBeats = beatsPerBar(timeSignature);
+  const lines: number[] = [];
+
+  for (let beat = 0; beat <= totalBeats; beat += barBeats) {
+    lines.push(beat);
+  }
+
+  return lines;
+}
+
+function slotCountForLength(lengthBeats: number, slotDurationBeats: number): number {
+  return Math.max(1, Math.ceil(Math.max(lengthBeats, slotDurationBeats) / slotDurationBeats));
 }
 
 export function arrangementEndBeat(notes: MelodyNote[], slots: HarmonySlot[]): number {
@@ -95,17 +130,23 @@ export function buildArrangementPlaybackEvents(
 export function generateHarmonyGrid(
   notes: MelodyNote[],
   existingSlots: HarmonySlot[],
-  gridBeats: HarmonyGridBeats
+  gridBeats: HarmonyGridBeats,
+  timeSignature = DEFAULT_TIME_SIGNATURE,
+  minimumBeats = 0
 ): HarmonySlot[] {
-  const count = slotCountForLength(arrangementEndBeat(notes, existingSlots), gridBeats);
+  const slotDurationBeats = gridDurationBeats(gridBeats, timeSignature);
+  const targetBeats = Math.max(minimumBeats, arrangementEndBeat(notes, existingSlots), slotDurationBeats);
+  const count = slotCountForLength(targetBeats, slotDurationBeats);
 
   return Array.from({ length: count }, (_, index) => {
     const existing = existingSlots[index];
+    const startBeat = index * slotDurationBeats;
+    const durationBeats = Math.min(slotDurationBeats, Math.max(0, targetBeats - startBeat));
 
     return {
-      id: existing?.id ?? makeSlotId(index * gridBeats, gridBeats),
-      startBeat: index * gridBeats,
-      durationBeats: gridBeats,
+      id: existing?.id ?? makeSlotId(startBeat, durationBeats),
+      startBeat,
+      durationBeats,
       chordId: existing?.chordId ?? null,
       voicingMidi: existing?.voicingMidi ?? null
     };
@@ -146,7 +187,8 @@ export function assignChordToSelectedOrNextEmpty(
   selectedSlotId: string | null,
   chord: CircleChord,
   settings: PlaybackSettings,
-  gridBeats: HarmonyGridBeats
+  gridBeats: HarmonyGridBeats,
+  timeSignature = DEFAULT_TIME_SIGNATURE
 ): { slots: HarmonySlot[]; selectedSlotId: string } {
   const targetSlot =
     (selectedSlotId ? slots.find((slot) => slot.id === selectedSlotId) : undefined) ??
@@ -160,10 +202,11 @@ export function assignChordToSelectedOrNextEmpty(
   }
 
   const startBeat = slots.length === 0 ? 0 : Math.max(...slots.map((slot) => slot.startBeat + slot.durationBeats));
+  const durationBeats = gridDurationBeats(gridBeats, timeSignature);
   const appendedSlot: HarmonySlot = {
-    id: makeSlotId(startBeat, gridBeats),
+    id: makeSlotId(startBeat, durationBeats),
     startBeat,
-    durationBeats: gridBeats,
+    durationBeats,
     chordId: chord.id,
     voicingMidi: null
   };
@@ -205,20 +248,33 @@ export function moveHarmonySlotChord(
   return revoiceHarmonySlots(next, settings);
 }
 
-export function slotsFromLegacyComposition(steps: CompositionStep[], gridBeats: HarmonyGridBeats): HarmonySlot[] {
+export function slotsFromLegacyComposition(
+  steps: CompositionStep[],
+  gridBeats: HarmonyGridBeats,
+  timeSignature = DEFAULT_TIME_SIGNATURE
+): HarmonySlot[] {
+  const durationBeats = gridDurationBeats(gridBeats, timeSignature);
+
   return steps.map((step, index) => ({
-    id: makeSlotId(index * gridBeats, gridBeats),
-    startBeat: index * gridBeats,
-    durationBeats: gridBeats,
+    id: makeSlotId(index * durationBeats, durationBeats),
+    startBeat: index * durationBeats,
+    durationBeats,
     chordId: step.chordId,
     voicingMidi: step.voicingMidi
   }));
 }
 
-function deserializeHarmonySlots(value: unknown, gridBeats: HarmonyGridBeats): HarmonySlot[] {
+function deserializeHarmonySlots(
+  value: unknown,
+  gridBeats: HarmonyGridBeats,
+  timeSignature: TimeSignature,
+  preserveStoredTiming: boolean
+): HarmonySlot[] {
   if (!Array.isArray(value)) {
     return [];
   }
+
+  const durationBeats = gridDurationBeats(gridBeats, timeSignature);
 
   return value.flatMap((slot, index) => {
     if (!slot || typeof slot !== "object") {
@@ -227,12 +283,25 @@ function deserializeHarmonySlots(value: unknown, gridBeats: HarmonyGridBeats): H
 
     const candidate = slot as Partial<HarmonySlot>;
     const chord = candidate.chordId ? CIRCLE_CHORDS_BY_ID.get(candidate.chordId) : undefined;
+    const fallbackStartBeat = index * durationBeats;
+    const storedDurationBeats =
+      typeof candidate.durationBeats === "number" &&
+      Number.isFinite(candidate.durationBeats) &&
+      candidate.durationBeats > 0 &&
+      candidate.durationBeats <= durationBeats
+        ? candidate.durationBeats
+        : durationBeats;
+    const startBeat =
+      preserveStoredTiming && typeof candidate.startBeat === "number" && Number.isFinite(candidate.startBeat)
+        ? candidate.startBeat
+        : fallbackStartBeat;
+    const slotDurationBeats = preserveStoredTiming ? storedDurationBeats : durationBeats;
 
     return [
       {
-        id: typeof candidate.id === "string" ? candidate.id : makeSlotId(index * gridBeats, gridBeats),
-        startBeat: typeof candidate.startBeat === "number" ? candidate.startBeat : index * gridBeats,
-        durationBeats: gridBeats,
+        id: typeof candidate.id === "string" ? candidate.id : makeSlotId(startBeat, slotDurationBeats),
+        startBeat,
+        durationBeats: slotDurationBeats,
         chordId: chord ? chord.id : null,
         voicingMidi: chord && isVoicing(candidate.voicingMidi) ? candidate.voicingMidi : null
       }
@@ -253,13 +322,15 @@ export function deserializeArrangementState(raw: string | null): ArrangementStat
     }
 
     const candidate = parsed as Partial<ArrangementState>;
-    const gridBeats = isHarmonyGridBeats(candidate.gridBeats)
-      ? candidate.gridBeats
-      : DEFAULT_HARMONY_GRID_BEATS;
+    const rawGridBeats = (parsed as { gridBeats?: unknown }).gridBeats;
+    const timeSignature = parseTimeSignature(candidate.timeSignature);
+    const preserveStoredTiming = rawGridBeats !== 4;
+    const gridBeats = parseHarmonyGridBeats(rawGridBeats);
 
     return {
       gridBeats,
-      harmonySlots: deserializeHarmonySlots(candidate.harmonySlots, gridBeats)
+      timeSignature,
+      harmonySlots: deserializeHarmonySlots(candidate.harmonySlots, gridBeats, timeSignature, preserveStoredTiming)
     };
   } catch {
     return null;
@@ -268,7 +339,11 @@ export function deserializeArrangementState(raw: string | null): ArrangementStat
 
 export function loadArrangementState(settings: PlaybackSettings): ArrangementState {
   if (typeof window === "undefined") {
-    return { gridBeats: DEFAULT_HARMONY_GRID_BEATS, harmonySlots: [] };
+    return {
+      gridBeats: DEFAULT_HARMONY_GRID_BEATS,
+      timeSignature: DEFAULT_TIME_SIGNATURE,
+      harmonySlots: []
+    };
   }
 
   const saved = deserializeArrangementState(window.localStorage.getItem(ARRANGEMENT_STORAGE_KEY));
@@ -281,7 +356,8 @@ export function loadArrangementState(settings: PlaybackSettings): ArrangementSta
 
   return {
     gridBeats: DEFAULT_HARMONY_GRID_BEATS,
-    harmonySlots: slotsFromLegacyComposition(legacySteps, DEFAULT_HARMONY_GRID_BEATS)
+    timeSignature: DEFAULT_TIME_SIGNATURE,
+    harmonySlots: slotsFromLegacyComposition(legacySteps, DEFAULT_HARMONY_GRID_BEATS, DEFAULT_TIME_SIGNATURE)
   };
 }
 

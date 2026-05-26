@@ -67,6 +67,50 @@ function makeNoteId(createdAt: number, midi: number): string {
   return `melody-${createdAt}-${midi}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function notesOverlap(startA: number, durationA: number, startB: number, durationB: number): boolean {
+  return startA < startB + durationB && startB < startA + durationA;
+}
+
+export function createGridMelodyNote(
+  midi: number,
+  startBeat: number,
+  durationBeats: number,
+  createdAt = Date.now(),
+  id = makeNoteId(createdAt, midi)
+): MelodyNote {
+  return {
+    id,
+    midi,
+    startBeat,
+    durationBeats,
+    velocity: 0.84,
+    createdAt
+  };
+}
+
+export function toggleGridMelodyNote(
+  notes: MelodyNote[],
+  midi: number,
+  startBeat: number,
+  durationBeats: number,
+  createdAt = Date.now()
+): MelodyNote[] {
+  const selectedNote = notes.find(
+    (note) => note.midi === midi && startBeat >= note.startBeat && startBeat < note.startBeat + note.durationBeats
+  );
+
+  if (selectedNote) {
+    return notes.filter((note) => note.id !== selectedNote.id);
+  }
+
+  return [
+    ...notes.filter(
+      (note) => note.midi !== midi || !notesOverlap(note.startBeat, note.durationBeats, startBeat, durationBeats)
+    ),
+    createGridMelodyNote(midi, startBeat, durationBeats, createdAt)
+  ].sort((a, b) => a.startBeat - b.startBeat || b.midi - a.midi || a.createdAt - b.createdAt);
+}
+
 export function normalizeKeyboardKey(key: string): string {
   return key.toLowerCase();
 }

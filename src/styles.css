@@ -82,7 +82,22 @@ button {
 }
 
 .circle-panel {
+  width: min(100%, 900px);
+  justify-self: center;
   padding: 12px;
+  transition:
+    width 360ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 360ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.main-stack.is-explore .circle-panel {
+  width: min(100%, 940px);
+  transform: translateY(0);
+}
+
+.main-stack.is-compose .circle-panel {
+  width: min(100%, 720px);
+  transform: translateY(0);
 }
 
 .mode-switch {
@@ -101,6 +116,10 @@ button {
   background: #fff;
   font-weight: 900;
   cursor: pointer;
+  transition:
+    background 180ms ease,
+    color 180ms ease,
+    transform 180ms ease;
 }
 
 .mode-switch button + button {
@@ -110,6 +129,10 @@ button {
 .mode-switch button.is-active {
   background: #111;
   color: #fff;
+}
+
+.mode-switch button:active {
+  transform: translateY(1px);
 }
 
 .circle-svg {
@@ -362,9 +385,9 @@ button {
   padding: 0 10px;
 }
 
-.timeline-actions button.is-danger {
-  background: #111;
-  color: #fff;
+.timeline-actions .compact-action {
+  min-width: 50px;
+  padding: 0 8px;
 }
 
 .timeline-actions button:disabled,
@@ -393,42 +416,6 @@ button {
   background: #fff;
 }
 
-.record-status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  padding: 9px 10px;
-  border: 1px solid #d5d5d0;
-  border-radius: 8px;
-  background: #f7f7f4;
-}
-
-.record-status strong {
-  font-size: 0.9rem;
-}
-
-.record-status small {
-  min-width: 0;
-  color: #555;
-  font-size: 0.8rem;
-  font-weight: 800;
-  overflow-wrap: anywhere;
-}
-
-.record-dot {
-  width: 9px;
-  height: 9px;
-  flex: 0 0 auto;
-  border: 1px solid #111;
-  border-radius: 999px;
-  background: #fff;
-}
-
-.record-dot.is-active {
-  background: #111;
-}
-
 .empty-timeline {
   display: grid;
   min-height: 82px;
@@ -439,6 +426,32 @@ button {
   font-size: 0.9rem;
   font-weight: 800;
   text-align: center;
+}
+
+.arrangement-shell {
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  transform: translateY(-10px) scale(0.985);
+  transform-origin: top center;
+  visibility: hidden;
+  transition:
+    max-height 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 220ms ease,
+    transform 360ms cubic-bezier(0.22, 1, 0.36, 1),
+    visibility 0s linear 420ms;
+}
+
+.main-stack.is-compose .arrangement-shell {
+  max-height: 1280px;
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  visibility: visible;
+  transition:
+    max-height 460ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 260ms ease 70ms,
+    transform 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    visibility 0s;
 }
 
 .arrangement-panel {
@@ -464,47 +477,105 @@ button {
   text-transform: uppercase;
 }
 
+.piano-roll {
+  display: grid;
+  grid-template-columns: 58px auto;
+  width: max-content;
+  min-width: 100%;
+}
+
+.pitch-labels {
+  display: grid;
+  border: 1px solid #111;
+  border-right: 0;
+  border-radius: 8px 0 0 8px;
+  background: #f7f7f4;
+  overflow: hidden;
+}
+
+.pitch-label {
+  display: flex;
+  align-items: center;
+  justify-content: end;
+  padding: 0 8px;
+  border-bottom: 1px solid #d5d5d0;
+  color: #555;
+  font-size: 0.72rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.pitch-label:last-child {
+  border-bottom: 0;
+}
+
 .melody-lane {
   position: relative;
   min-width: 100%;
-  height: 96px;
   border: 1px solid #111;
-  border-radius: 8px;
+  border-radius: 0 8px 8px 0;
   background:
     repeating-linear-gradient(
       to right,
-      transparent 0,
-      transparent 71px,
-      #d5d5d0 71px,
-      #d5d5d0 72px
+      rgba(17, 17, 17, 0.12) 0,
+      rgba(17, 17, 17, 0.12) 1px,
+      transparent 1px,
+      transparent var(--sixteenth-width, 18px)
+    ),
+    repeating-linear-gradient(
+      to right,
+      rgba(17, 17, 17, 0.34) 0,
+      rgba(17, 17, 17, 0.34) 2px,
+      transparent 2px,
+      transparent var(--beat-width, 72px)
+    ),
+    repeating-linear-gradient(
+      to right,
+      #111 0,
+      #111 2px,
+      transparent 2px,
+      transparent var(--bar-width, 288px)
+    ),
+    repeating-linear-gradient(
+      to bottom,
+      rgba(17, 17, 17, 0.12) 0,
+      rgba(17, 17, 17, 0.12) 1px,
+      transparent 1px,
+      transparent 24px
     ),
     #fff;
+  overflow: hidden;
 }
 
-.empty-lane {
+.melody-cell {
   position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  color: #555;
-  font-size: 0.86rem;
-  font-weight: 850;
+  z-index: 1;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.melody-cell:hover,
+.melody-cell:focus-visible {
+  background: rgba(17, 17, 17, 0.09);
+  outline: none;
 }
 
 .melody-note {
   position: absolute;
+  z-index: 2;
   min-width: 30px;
-  height: 24px;
-  padding: 0 6px;
+  padding: 0 5px;
   border: 1px solid #111;
-  border-radius: 999px;
+  border-radius: 4px;
   background: #111;
   color: #fff;
-  font-size: 0.72rem;
+  font-size: 0.68rem;
   font-weight: 900;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: pointer;
 }
 
 .harmony-lane {
@@ -514,6 +585,17 @@ button {
   margin: 0;
   padding: 0;
   list-style: none;
+}
+
+.harmony-track {
+  display: grid;
+  grid-template-columns: 58px auto;
+  width: max-content;
+  min-width: 100%;
+}
+
+.track-gutter {
+  width: 58px;
 }
 
 .harmony-slot {
@@ -793,6 +875,7 @@ button {
   }
 
   .circle-panel {
+    width: 100%;
     padding: 6px;
   }
 

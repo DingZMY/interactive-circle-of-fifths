@@ -3,9 +3,12 @@ import { getCircleChord } from "./circleData";
 import type { CompositionStep } from "./composition";
 import {
   assignChordToSelectedOrNextEmpty,
+  beatsPerBar,
   buildArrangementPlaybackEvents,
   deserializeArrangementState,
   generateHarmonyGrid,
+  gridDurationBeats,
+  measureLineBeats,
   revoiceHarmonySlots,
   slotsFromLegacyComposition
 } from "./arrangement";
@@ -24,10 +27,25 @@ const melodyNotes: MelodyNote[] = [
 ];
 
 describe("arrangement harmony grid", () => {
-  it("generates 1, 2, and 4 beat harmony grids from melody length", () => {
+  it("generates 1, 2, and bar-length harmony grids from melody length", () => {
     expect(generateHarmonyGrid(melodyNotes, [], 1)).toHaveLength(4);
     expect(generateHarmonyGrid(melodyNotes, [], 2)).toHaveLength(2);
-    expect(generateHarmonyGrid(melodyNotes, [], 4)).toHaveLength(1);
+    expect(generateHarmonyGrid(melodyNotes, [], "bar")).toHaveLength(1);
+    expect(generateHarmonyGrid(melodyNotes, [], "bar", "3/4")).toHaveLength(2);
+  });
+
+  it("maps time signatures to bar lengths and measure lines", () => {
+    expect(beatsPerBar("4/4")).toBe(4);
+    expect(beatsPerBar("3/4")).toBe(3);
+    expect(gridDurationBeats("bar", "4/4")).toBe(4);
+    expect(gridDurationBeats("bar", "3/4")).toBe(3);
+    expect(measureLineBeats(8, "4/4")).toEqual([0, 4, 8]);
+    expect(measureLineBeats(6, "3/4")).toEqual([0, 3, 6]);
+  });
+
+  it("uses the active time signature when adding one bar of minimum space", () => {
+    expect(generateHarmonyGrid([], [], "bar", "4/4", beatsPerBar("4/4")).at(-1)?.durationBeats).toBe(4);
+    expect(generateHarmonyGrid([], [], "bar", "3/4", beatsPerBar("3/4")).at(-1)?.durationBeats).toBe(3);
   });
 
   it("assigns a chord to the selected slot and generates a voicing", () => {
@@ -92,7 +110,57 @@ describe("arrangement harmony grid", () => {
     const state = deserializeArrangementState(raw);
 
     expect(state?.gridBeats).toBe(2);
+    expect(state?.timeSignature).toBe("4/4");
     expect(state?.harmonySlots[0].chordId).toBe(chord.id);
+  });
+
+  it("deserializes time signatures and migrates old 4-beat grids to bar grids", () => {
+    const chord = getCircleChord(0, "major");
+    const raw = JSON.stringify({
+      gridBeats: 4,
+      timeSignature: "3/4",
+      harmonySlots: [
+        {
+          id: "slot",
+          startBeat: 0,
+          durationBeats: 4,
+          chordId: chord.id,
+          voicingMidi: [48, 55, 64, 72]
+        }
+      ]
+    });
+    const state = deserializeArrangementState(raw);
+
+    expect(state?.gridBeats).toBe("bar");
+    expect(state?.timeSignature).toBe("3/4");
+    expect(state?.harmonySlots[0].durationBeats).toBe(3);
+  });
+
+  it("preserves stored partial slots from current arrangement saves", () => {
+    const chord = getCircleChord(0, "major");
+    const raw = JSON.stringify({
+      gridBeats: 2,
+      timeSignature: "3/4",
+      harmonySlots: [
+        {
+          id: "tail",
+          startBeat: 8,
+          durationBeats: 1,
+          chordId: chord.id,
+          voicingMidi: [48, 55, 64, 72]
+        }
+      ]
+    });
+    const state = deserializeArrangementState(raw);
+
+    expect(state?.harmonySlots[0].startBeat).toBe(8);
+    expect(state?.harmonySlots[0].durationBeats).toBe(1);
+  });
+
+  it("falls back to 4/4 for invalid or missing time signatures", () => {
+    const state = deserializeArrangementState(JSON.stringify({ gridBeats: 2, timeSignature: "7/8", harmonySlots: [] }));
+
+    expect(state?.timeSignature).toBe("4/4");
   });
 
   it("migrates legacy composition steps into harmony slots", () => {

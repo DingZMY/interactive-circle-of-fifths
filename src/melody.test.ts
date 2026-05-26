@@ -5,7 +5,8 @@ import {
   handleMelodyKeyDown,
   handleMelodyKeyUp,
   midiForKeyboardKey,
-  quantizeRawMelodyNotes
+  quantizeRawMelodyNotes,
+  toggleGridMelodyNote
 } from "./melody";
 
 describe("melody keyboard recording", () => {
@@ -62,5 +63,33 @@ describe("melody keyboard recording", () => {
 
     expect(notes[0].startBeat).toBe(0);
     expect(notes[0].durationBeats).toBe(0.5);
+  });
+
+  it("toggles grid notes by pitch and start cell", () => {
+    const added = toggleGridMelodyNote([], 60, 1, 0.5, 10);
+    const removed = toggleGridMelodyNote(added, 60, 1, 0.5, 20);
+
+    expect(added).toEqual([
+      expect.objectContaining({
+        midi: 60,
+        startBeat: 1,
+        durationBeats: 0.5
+      })
+    ]);
+    expect(removed).toEqual([]);
+  });
+
+  it("replaces overlapping notes on the same pitch", () => {
+    const first = toggleGridMelodyNote([], 64, 0.5, 1, 10);
+    const second = toggleGridMelodyNote(first, 64, 0, 1, 20);
+
+    expect(second).toHaveLength(1);
+    expect(second[0]).toEqual(
+      expect.objectContaining({
+        midi: 64,
+        startBeat: 0,
+        durationBeats: 1
+      })
+    );
   });
 });

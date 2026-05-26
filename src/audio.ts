@@ -1,6 +1,12 @@
 import type { CircleChord } from "./circleData";
 import type { CompositionStep } from "./composition";
-import { arrangementEndBeat, type HarmonySlot } from "./arrangement";
+import {
+  DEFAULT_TIME_SIGNATURE,
+  arrangementEndBeat,
+  beatsPerBar,
+  type HarmonySlot,
+  type TimeSignature
+} from "./arrangement";
 import type { MelodyNote } from "./melody";
 import type { PlaybackSettings, SoundPreset } from "./playbackSettings";
 import { buildSmartVoicing, type Voicing } from "./voicing";
@@ -27,6 +33,14 @@ interface PresetEngine {
 
 interface PlaybackHandle {
   stop: () => void;
+}
+
+export interface ChordPatternEvent {
+  midi: number;
+  voiceIndex: number;
+  startBeat: number;
+  durationBeats: number;
+  velocity: number;
 }
 
 const PRESET_ENGINES: Record<SoundPreset, PresetEngine> = {
@@ -128,6 +142,132 @@ function clampGain(value: number): number {
   return Math.max(0.0001, value);
 }
 
+function pushPatternEvent(
+  events: ChordPatternEvent[],
+  slot: HarmonySlot,
+  voiceIndex: number,
+  offsetBeat: number,
+  durationBeats: number,
+  velocity: number
+): void {
+  if (!slot.voicingMidi) {
+    return;
+  }
+
+  const startBeat = slot.startBeat + offsetBeat;
+  const slotEndBeat = slot.startBeat + slot.durationBeats;
+  const endBeat = Math.min(slotEndBeat, startBeat + Math.max(0.05, durationBeats));
+
+  if (startBeat >= slotEndBeat || endBeat - startBeat < 0.035) {
+    return;
+  }
+
+  events.push({
+    midi: slot.voicingMidi[voiceIndex],
+    voiceIndex,
+    startBeat,
+    durationBeats: endBeat - startBeat,
+    velocity
+  });
+}
+
+function pushVoiceGroup(
+  events: ChordPatternEvent[],
+  slot: HarmonySlot,
+  voiceIndices: number[],
+  offsetBeat: number,
+  durationBeats: number,
+  velocity: number
+): void {
+  for (const voiceIndex of voiceIndices) {
+    pushPatternEvent(events, slot, voiceIndex, offsetBeat, durationBeats, velocity);
+  }
+}
+
+function isBarStart(beat: number, timeSignature: TimeSignature): boolean {
+  const barBeats = beatsPerBar(timeSignature);
+  const beatInBar = ((beat % barBeats) + barBeats) % barBeats;
+
+  return beatInBar < 0.001 || barBeats - beatInBar < 0.001;
+}
+
+export function buildChordPatternEvents(
+  slot: HarmonySlot,
+  settings: PlaybackSettings,
+  timeSignature: TimeSignature = DEFAULT_TIME_SIGNATURE
+): ChordPatternEvent[] {
+  if (!slot.voicingMidi || slot.durationBeats <= 0) {
+    return [];
+  }
+
+  const events: ChordPatternEvent[] = [];
+  const barBeats = beatsPerBar(timeSignature);
+  const motionLift = settings.motion * 0.12;
+
+  if (settings.chordPattern === "held") {
+    pushVoiceGroup(events, slot, [0, 1, 2, 3], 0, slot.durationBeats, 0.82 + motionLift);
+    return events;
+  }
+
+  if (settings.chordPattern === "pulse") {
+    for (let offsetBeat = 0; offsetBeat < slot.durationBeats; offsetBeat += 1) {
+      const absoluteBeat = slot.startBeat + offsetBeat;
+      const velocity = isBarStart(absoluteBeat, timeSignature) ? 0.88 + motionLift : 0.62 + motionLift;
+
+      pushVoiceGroup(events, slot, [0, 1, 2, 3], offsetBeat, 0.72 + settings.motion * 0.16, velocity);
+    }
+
+    return events;
+  }
+
+  if (settings.chordPattern === "arp") {
+    const order = [0, 1, 2, 3, 2, 1];
+    const stepBeats = 0.5;
+
+    for (let offsetBeat = 0, step = 0; offsetBeat < slot.durationBeats; offsetBeat += stepBeats, step += 1) {
+      const voiceIndex = order[step % order.length];
+      const velocity = isBarStart(slot.startBeat + offsetBeat, timeSignature)
+        ? 0.84 + motionLift
+        : 0.58 + motionLift + (voiceIndex === 0 ? 0.05 : 0);
+
+      pushPatternEvent(events, slot, voiceIndex, offsetBeat, 0.42 + settings.motion * 0.12, velocity);
+    }
+
+    return events;
+  }
+
+  const brokenPattern =
+    timeSignature === "3/4"
+      ? [
+          { offset: 0, voices: [0], duration: 1.05, velocity: 0.9 },
+          { offset: 0.5, voices: [1, 2], duration: 0.62, velocity: 0.62 },
+          { offset: 1.25, voices: [0, 3], duration: 0.58, velocity: 0.6 },
+          { offset: 2, voices: [1, 2, 3], duration: 0.82, velocity: 0.68 }
+        ]
+      : [
+          { offset: 0, voices: [0], duration: 1.1, velocity: 0.9 },
+          { offset: 0.5, voices: [1, 2], duration: 0.66, velocity: 0.62 },
+          { offset: 1.25, voices: [3], duration: 0.58, velocity: 0.58 },
+          { offset: 2, voices: [0, 2], duration: 0.7, velocity: 0.62 },
+          { offset: 3, voices: [1, 2, 3], duration: 0.85, velocity: 0.68 }
+        ];
+
+  for (let barOffset = 0; barOffset < slot.durationBeats; barOffset += barBeats) {
+    for (const entry of brokenPattern) {
+      pushVoiceGroup(
+        events,
+        slot,
+        entry.voices,
+        barOffset + entry.offset,
+        entry.duration + settings.motion * 0.08,
+        entry.velocity + motionLift
+      );
+    }
+  }
+
+  return events.sort((a, b) => a.startBeat - b.startBeat || a.voiceIndex - b.voiceIndex);
+}
+
 function createOutputChain(context: AudioContext, settings: PlaybackSettings) {
   const input = context.createGain();
   const dry = context.createGain();
@@ -186,7 +326,8 @@ function scheduleVoice(
   start: number,
   duration: number,
   voiceIndex: number,
-  settings: PlaybackSettings
+  settings: PlaybackSettings,
+  velocity = 1
 ): AudioScheduledSourceNode[] {
   const preset = PRESET_ENGINES[settings.preset];
   const motion = settings.motion;
@@ -205,14 +346,15 @@ function scheduleVoice(
     preset.filterType === "lowpass"
       ? preset.filterFrequency + motion * 3600
       : Math.max(160, preset.filterFrequency - motion * 170);
+  const velocityGain = Math.max(0.18, velocity);
 
   voiceGain.gain.setValueAtTime(0.0001, voiceStart);
-  voiceGain.gain.linearRampToValueAtTime(clampGain(preset.gain / 4.8), voiceStart + preset.attack);
+  voiceGain.gain.linearRampToValueAtTime(clampGain((preset.gain * velocityGain) / 4.8), voiceStart + preset.attack);
   voiceGain.gain.exponentialRampToValueAtTime(
-    clampGain((preset.gain * preset.sustain) / 4.8),
+    clampGain((preset.gain * preset.sustain * velocityGain) / 4.8),
     voiceStart + preset.attack + preset.decay
   );
-  voiceGain.gain.setValueAtTime(clampGain((preset.gain * preset.sustain) / 4.8), releaseStart);
+  voiceGain.gain.setValueAtTime(clampGain((preset.gain * preset.sustain * velocityGain) / 4.8), releaseStart);
   voiceGain.gain.linearRampToValueAtTime(0.0001, start + duration + preset.release);
 
   filter.type = preset.filterType;
@@ -388,14 +530,36 @@ export function stopPlayback(): void {
 export function playChordPreview(
   chord: CircleChord,
   settings: PlaybackSettings,
-  previousVoicing?: Voicing
+  previousVoicing?: Voicing,
+  timeSignature: TimeSignature = DEFAULT_TIME_SIGNATURE
 ): Voicing {
   const voicing = buildSmartVoicing(chord, settings, previousVoicing);
 
   startPlayback(
     (context, destination, start) => {
-      const duration = 1.55;
-      const sources = scheduleChord(context, destination, voicing, start, duration, settings);
+      const secondsPerBeat = 60 / settings.tempoBpm;
+      const durationBeats = Math.min(2, beatsPerBar(timeSignature));
+      const previewSlot: HarmonySlot = {
+        id: "preview",
+        startBeat: 0,
+        durationBeats,
+        chordId: chord.id,
+        voicingMidi: voicing
+      };
+      const events = buildChordPatternEvents(previewSlot, settings, timeSignature);
+      const sources = events.flatMap((event) =>
+        scheduleVoice(
+          context,
+          destination,
+          event.midi,
+          start + event.startBeat * secondsPerBeat,
+          event.durationBeats * secondsPerBeat,
+          event.voiceIndex,
+          settings,
+          event.velocity
+        )
+      );
+      const duration = durationBeats * secondsPerBeat;
 
       return {
         sources,
@@ -455,6 +619,7 @@ export function playArrangement(
   melodyNotes: MelodyNote[],
   harmonySlots: HarmonySlot[],
   settings: PlaybackSettings,
+  timeSignature: TimeSignature = DEFAULT_TIME_SIGNATURE,
   onEnded?: () => void
 ): void {
   const secondsPerBeat = 60 / settings.tempoBpm;
@@ -468,16 +633,20 @@ export function playArrangement(
           continue;
         }
 
-        sources.push(
-          ...scheduleChord(
-            context,
-            destination,
-            slot.voicingMidi,
-            start + slot.startBeat * secondsPerBeat,
-            slot.durationBeats * secondsPerBeat,
-            settings
-          )
-        );
+        for (const event of buildChordPatternEvents(slot, settings, timeSignature)) {
+          sources.push(
+            ...scheduleVoice(
+              context,
+              destination,
+              event.midi,
+              start + event.startBeat * secondsPerBeat,
+              event.durationBeats * secondsPerBeat,
+              event.voiceIndex,
+              settings,
+              event.velocity
+            )
+          );
+        }
       }
 
       for (const note of melodyNotes) {

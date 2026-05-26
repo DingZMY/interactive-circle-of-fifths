@@ -1,12 +1,14 @@
 export type SoundPreset = "chamber-keys" | "warm-pad" | "glass-pluck" | "string-ensemble";
 export type RegisterSetting = "low" | "mid" | "high";
 export type SpreadSetting = "compact" | "open" | "wide";
+export type ChordPattern = "held" | "pulse" | "broken" | "arp";
 
 export interface PlaybackSettings {
   preset: SoundPreset;
   tempoBpm: number;
   register: RegisterSetting;
   spread: SpreadSetting;
+  chordPattern: ChordPattern;
   motion: number;
   reverbAmount: number;
 }
@@ -16,11 +18,23 @@ export interface SoundPresetOption {
   label: string;
 }
 
+export interface ChordPatternOption {
+  id: ChordPattern;
+  label: string;
+}
+
 export const SOUND_PRESETS: SoundPresetOption[] = [
   { id: "chamber-keys", label: "Chamber Keys" },
   { id: "warm-pad", label: "Warm Pad" },
   { id: "glass-pluck", label: "Glass Pluck" },
   { id: "string-ensemble", label: "String Ensemble" }
+];
+
+export const CHORD_PATTERN_OPTIONS: ChordPatternOption[] = [
+  { id: "held", label: "Held" },
+  { id: "pulse", label: "Pulse" },
+  { id: "broken", label: "Broken" },
+  { id: "arp", label: "Arp" }
 ];
 
 export const REGISTER_OPTIONS: RegisterSetting[] = ["low", "mid", "high"];
@@ -33,6 +47,7 @@ export const DEFAULT_PLAYBACK_SETTINGS: PlaybackSettings = {
   tempoBpm: 88,
   register: "mid",
   spread: "open",
+  chordPattern: "broken",
   motion: 0.38,
   reverbAmount: 0.34
 };
@@ -47,6 +62,10 @@ function isRegister(value: unknown): value is RegisterSetting {
 
 function isSpread(value: unknown): value is SpreadSetting {
   return SPREAD_OPTIONS.includes(value as SpreadSetting);
+}
+
+function isChordPattern(value: unknown): value is ChordPattern {
+  return CHORD_PATTERN_OPTIONS.some((option) => option.id === value);
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -68,6 +87,9 @@ export function sanitizePlaybackSettings(value: unknown): PlaybackSettings {
         : DEFAULT_PLAYBACK_SETTINGS.tempoBpm,
     register: isRegister(candidate.register) ? candidate.register : DEFAULT_PLAYBACK_SETTINGS.register,
     spread: isSpread(candidate.spread) ? candidate.spread : DEFAULT_PLAYBACK_SETTINGS.spread,
+    chordPattern: isChordPattern(candidate.chordPattern)
+      ? candidate.chordPattern
+      : DEFAULT_PLAYBACK_SETTINGS.chordPattern,
     motion:
       typeof candidate.motion === "number"
         ? clamp(candidate.motion, 0, 1)

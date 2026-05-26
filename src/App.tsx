@@ -1,12 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { playArrangement, playChordPreview, playMelodyNotePreview, stopPlayback } from "./audio";
 import {
+  TIME_SIGNATURES,
   arrangementEndBeat,
   assignChordToSelectedOrNextEmpty,
+  beatsPerBar,
   clearHarmonySlots,
   generateHarmonyGrid,
+  gridDurationBeats,
   type HarmonyGridBeats,
   type HarmonySlot,
+  type TimeSignature,
   loadArrangementState,
   moveHarmonySlotChord,
   removeHarmonySlotChord,
@@ -29,19 +33,14 @@ import {
 } from "./circleData";
 import {
   type MelodyNote,
-  type MelodyRecorderState,
-  createMelodyRecorderState,
-  finishMelodyRecording,
-  handleMelodyKeyDown,
-  handleMelodyKeyUp,
   loadMelodyNotes,
-  midiForKeyboardKey,
-  normalizeKeyboardKey,
-  saveMelodyNotes
+  saveMelodyNotes,
+  toggleGridMelodyNote
 } from "./melody";
 import { MODES, type ModeName, type ModePlan, buildModePlan, findModeMembership } from "./modes";
 import { getChordTones, qualityLabel } from "./music";
 import {
+  CHORD_PATTERN_OPTIONS,
   REGISTER_OPTIONS,
   SOUND_PRESETS,
   SPREAD_OPTIONS,
@@ -53,8 +52,13 @@ import { type VisitorCounterResult, hitVisitorCounter } from "./visitorCounter";
 
 type InteractionMode = "explore" | "compose";
 
-const GRID_OPTIONS: HarmonyGridBeats[] = [1, 2, 4];
+const GRID_OPTIONS: HarmonyGridBeats[] = [1, 2, "bar"];
 const BEAT_WIDTH = 72;
+const SIXTEENTH_BEATS = 0.25;
+const SIXTEENTH_WIDTH = BEAT_WIDTH * SIXTEENTH_BEATS;
+const PIANO_ROW_HEIGHT = 24;
+const MIN_TRACK_BARS = 2;
+const PIANO_ROLL_ROWS = Array.from({ length: 25 }, (_, index) => 84 - index);
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
 function describeSectorPath(index: number, innerRadius: number, outerRadius: number): string {
@@ -108,12 +112,12 @@ function optionLabel(value: string): string {
   return `${value[0].toUpperCase()}${value.slice(1)}`;
 }
 
-function isEditableTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) {
-    return false;
-  }
+function gridOptionLabel(value: HarmonyGridBeats): string {
+  return value === "bar" ? "1 bar" : `${value} beat${value > 1 ? "s" : ""}`;
+}
 
-  return ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName) || target.isContentEditable;
+function parseGridOption(value: string): HarmonyGridBeats {
+  return value === "bar" ? "bar" : (Number(value) as HarmonyGridBeats);
 }
 
 function CellHighlight({ chord }: { chord: CircleChord }) {
@@ -374,6 +378,16 @@ function SoundModule({
           </select>
         </label>
         <label>
+          <span>Pattern</span>
+          <select value={settings.chordPattern} onChange={(event) => update({ chordPattern: event.target.value as PlaybackSettings["chordPattern"] })}>
+            {CHORD_PATTERN_OPTIONS.map((option) => (
+              <option value={option.id} key={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
           <span>Motion</span>
           <input
             max={100}
@@ -407,14 +421,16 @@ function ArrangementTimeline({
   harmonySlots,
   selectedSlotId,
   gridBeats,
+  timeSignature,
+  noteDurationBeats,
   modePlan,
-  isRecording,
   isPlaying,
-  activeMidi,
-  octaveOffset,
-  onRecordToggle,
   onPlayToggle,
   onGridChange,
+  onTimeSignatureChange,
+  onNoteDurationChange,
+  onAddMeasure,
+  onToggleMelodyNote,
   onSelectSlot,
   onRemoveChord,
   onMoveChord,
@@ -426,14 +442,16 @@ function ArrangementTimeline({
   harmonySlots: HarmonySlot[];
   selectedSlotId: string | null;
   gridBeats: HarmonyGridBeats;
+  timeSignature: TimeSignature;
+  noteDurationBeats: number;
   modePlan: ModePlan;
-  isRecording: boolean;
   isPlaying: boolean;
-  activeMidi: number | null;
-  octaveOffset: number;
-  onRecordToggle: () => void;
   onPlayToggle: () => void;
   onGridChange: (gridBeats: HarmonyGridBeats) => void;
+  onTimeSignatureChange: (timeSignature: TimeSignature) => void;
+  onNoteDurationChange: (beats: number) => void;
+  onAddMeasure: () => void;
+  onToggleMelodyNote: (midi: number, startBeat: number) => void;
   onSelectSlot: (slot: HarmonySlot) => void;
   onRemoveChord: (slotId: string) => void;
   onMoveChord: (slotId: string, direction: -1 | 1) => void;
@@ -441,11 +459,24 @@ function ArrangementTimeline({
   onClearHarmony: () => void;
   onClearAll: () => void;
 }) {
-  const totalBeats = Math.max(1, arrangementEndBeat(melodyNotes, harmonySlots));
+  const measureBeats = beatsPerBar(timeSignature);
+  const minimumTrackBeats = measureBeats * MIN_TRACK_BARS;
+  const noteLengthOptions = [
+    { label: "1/16", beats: 0.25 },
+    { label: "1/8", beats: 0.5 },
+    { label: "1/4", beats: 1 },
+    { label: "1/2", beats: 2 },
+    { label: "1 bar", beats: measureBeats }
+  ];
+  const totalBeats = Math.max(minimumTrackBeats, Math.ceil(arrangementEndBeat(melodyNotes, harmonySlots)));
+  const sixteenthCount = Math.ceil(totalBeats / SIXTEENTH_BEATS);
   const trackWidth = totalBeats * BEAT_WIDTH;
-  const minMidi = melodyNotes.length > 0 ? Math.min(...melodyNotes.map((note) => note.midi)) : 60;
-  const maxMidi = melodyNotes.length > 0 ? Math.max(...melodyNotes.map((note) => note.midi)) : 72;
-  const midiRange = Math.max(1, maxMidi - minMidi);
+  const rollHeight = PIANO_ROLL_ROWS.length * PIANO_ROW_HEIGHT;
+  const laneTimingStyle = {
+    "--sixteenth-width": `${SIXTEENTH_WIDTH}px`,
+    "--beat-width": `${BEAT_WIDTH}px`,
+    "--bar-width": `${measureBeats * BEAT_WIDTH}px`
+  } as CSSProperties;
 
   return (
     <section className="timeline-panel arrangement-panel" aria-label="Composition timeline">
@@ -457,18 +488,38 @@ function ArrangementTimeline({
           </h2>
         </div>
         <div className="timeline-actions">
-          <button className={isRecording ? "is-danger" : ""} onClick={onRecordToggle} type="button">
-            {isRecording ? "Stop Rec" : "Record"}
-          </button>
           <button disabled={melodyNotes.length === 0 && harmonySlots.every((slot) => !slot.chordId)} onClick={onPlayToggle} type="button">
             {isPlaying ? "Stop" : "Play"}
           </button>
+          <button className="compact-action" onClick={onAddMeasure} title={`Add one ${measureBeats}-beat bar`} type="button">
+            + Bar
+          </button>
+          <label className="grid-select">
+            <span>Time</span>
+            <select value={timeSignature} onChange={(event) => onTimeSignatureChange(event.target.value as TimeSignature)}>
+              {TIME_SIGNATURES.map((option) => (
+                <option value={option} key={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="grid-select">
+            <span>Note</span>
+            <select value={noteDurationBeats} onChange={(event) => onNoteDurationChange(Number(event.target.value))}>
+              {noteLengthOptions.map((option) => (
+                <option value={option.beats} key={option.label}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
           <label className="grid-select">
             <span>Grid</span>
-            <select value={gridBeats} onChange={(event) => onGridChange(Number(event.target.value) as HarmonyGridBeats)}>
+            <select value={gridBeats} onChange={(event) => onGridChange(parseGridOption(event.target.value))}>
               {GRID_OPTIONS.map((option) => (
                 <option value={option} key={option}>
-                  {option} beat{option > 1 ? "s" : ""}
+                  {gridOptionLabel(option)}
                 </option>
               ))}
             </select>
@@ -476,85 +527,112 @@ function ArrangementTimeline({
         </div>
       </div>
 
-      <div className="record-status">
-        <span className={isRecording ? "record-dot is-active" : "record-dot"} />
-        <strong>{isRecording ? "Recording" : "Ready"}</strong>
-        <small>
-          {activeMidi === null ? `Octave ${octaveOffset >= 0 ? "+" : ""}${octaveOffset}` : `${noteName(activeMidi)} active`}
-        </small>
-      </div>
-
       <div className="arrangement-scroll">
         <div className="lane-label">Melody</div>
-        <div className="melody-lane" style={{ width: trackWidth }}>
-          {melodyNotes.length === 0 ? (
-            <div className="empty-lane">No melody</div>
-          ) : (
-            melodyNotes.map((note) => {
-              const top = 10 + ((maxMidi - note.midi) / midiRange) * 56;
+        <div className="piano-roll" style={{ height: rollHeight }}>
+          <div className="pitch-labels" style={{ height: rollHeight }}>
+            {PIANO_ROLL_ROWS.map((midi) => (
+              <div className="pitch-label" key={midi} style={{ height: PIANO_ROW_HEIGHT }}>
+                {noteName(midi)}
+              </div>
+            ))}
+          </div>
+          <div className="melody-lane" style={{ ...laneTimingStyle, width: trackWidth, height: rollHeight }}>
+            {PIANO_ROLL_ROWS.map((midi, rowIndex) =>
+              Array.from({ length: sixteenthCount }, (_, columnIndex) => {
+                const startBeat = columnIndex * SIXTEENTH_BEATS;
+
+                return (
+                  <button
+                    aria-label={`Add ${noteName(midi)} at beat ${startBeat + 1}`}
+                    className="melody-cell"
+                    key={`${midi}-${columnIndex}`}
+                    onClick={() => onToggleMelodyNote(midi, startBeat)}
+                    style={{
+                      left: columnIndex * SIXTEENTH_WIDTH,
+                      top: rowIndex * PIANO_ROW_HEIGHT,
+                      width: SIXTEENTH_WIDTH,
+                      height: PIANO_ROW_HEIGHT
+                    }}
+                    type="button"
+                  />
+                );
+              })
+            )}
+            {melodyNotes.map((note) => {
+              const rowIndex = PIANO_ROLL_ROWS.indexOf(note.midi);
+
+              if (rowIndex < 0) {
+                return null;
+              }
 
               return (
                 <button
                   className="melody-note"
                   key={note.id}
+                  onClick={() => onToggleMelodyNote(note.midi, note.startBeat)}
                   style={{
-                    left: note.startBeat * BEAT_WIDTH,
-                    top,
-                    width: Math.max(32, note.durationBeats * BEAT_WIDTH - 4)
+                    left: note.startBeat * BEAT_WIDTH + 2,
+                    top: rowIndex * PIANO_ROW_HEIGHT + 3,
+                    width: Math.max(14, note.durationBeats * BEAT_WIDTH - 4),
+                    height: PIANO_ROW_HEIGHT - 6
                   }}
-                  title={noteName(note.midi)}
+                  title={`${noteName(note.midi)} / ${note.durationBeats} beats`}
                   type="button"
                 >
                   {noteName(note.midi)}
                 </button>
               );
-            })
-          )}
+            })}
+          </div>
         </div>
 
         <div className="lane-label">Harmony</div>
-        <ol className="harmony-lane" style={{ width: trackWidth }}>
-          {harmonySlots.map((slot) => {
-            const chord = slot.chordId ? CIRCLE_CHORDS_BY_ID.get(slot.chordId) : undefined;
-            const membership = chord ? findModeMembership(modePlan, chord) : undefined;
+        <div className="harmony-track">
+          <div className="track-gutter" aria-hidden="true" />
+          <ol className="harmony-lane" style={{ width: trackWidth }}>
+            {harmonySlots.map((slot) => {
+              const chord = slot.chordId ? CIRCLE_CHORDS_BY_ID.get(slot.chordId) : undefined;
+              const membership = chord ? findModeMembership(modePlan, chord) : undefined;
 
-            return (
-              <li className={`harmony-slot${selectedSlotId === slot.id ? " is-selected" : ""}`} key={slot.id}>
-                <button
-                  className="harmony-slot-main"
-                  onClick={() => onSelectSlot(slot)}
-                  style={{ width: slot.durationBeats * BEAT_WIDTH - 6 }}
-                  type="button"
-                >
-                  {chord ? (
-                    <>
-                      <span className="step-color" style={{ background: chord.color }} />
-                      <strong>{chord.label}</strong>
-                      <small>{membership ? membership.roman : "outside"}</small>
-                    </>
-                  ) : (
-                    <strong>Empty</strong>
-                  )}
-                </button>
-                <div className="step-controls">
-                  <button disabled={!chord || slot.startBeat === 0} onClick={() => onMoveChord(slot.id, -1)} type="button">
-                    {"<"}
-                  </button>
+              return (
+                <li className={`harmony-slot${selectedSlotId === slot.id ? " is-selected" : ""}`} key={slot.id}>
                   <button
-                    disabled={!chord || slot.startBeat + slot.durationBeats >= totalBeats}
-                    onClick={() => onMoveChord(slot.id, 1)}
+                    className="harmony-slot-main"
+                    onClick={() => onSelectSlot(slot)}
+                    style={{ width: slot.durationBeats * BEAT_WIDTH - 6 }}
                     type="button"
                   >
-                    {">"}
+                    {chord ? (
+                      <>
+                        <span className="step-color" style={{ background: chord.color }} />
+                        <strong>{chord.label}</strong>
+                        <small>{membership ? membership.roman : "outside"}</small>
+                      </>
+                    ) : (
+                      <strong>Empty</strong>
+                    )}
                   </button>
-                  <button disabled={!chord} onClick={() => onRemoveChord(slot.id)} type="button">
-                    x
-                  </button>
-                </div>
-              </li>
-            );
-          })}
-        </ol>
+                  <div className="step-controls">
+                    <button disabled={!chord || slot.startBeat === 0} onClick={() => onMoveChord(slot.id, -1)} type="button">
+                      {"<"}
+                    </button>
+                    <button
+                      disabled={!chord || slot.startBeat + slot.durationBeats >= totalBeats}
+                      onClick={() => onMoveChord(slot.id, 1)}
+                      type="button"
+                    >
+                      {">"}
+                    </button>
+                    <button disabled={!chord} onClick={() => onRemoveChord(slot.id)} type="button">
+                      x
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
+          </ol>
+        </div>
       </div>
 
       <div className="timeline-actions secondary-actions">
@@ -684,21 +762,25 @@ export default function App() {
   const [melodyNotes, setMelodyNotes] = useState<MelodyNote[]>(() => loadMelodyNotes());
   const [initialArrangement] = useState(() => loadArrangementState(playbackSettings));
   const [gridBeats, setGridBeats] = useState<HarmonyGridBeats>(initialArrangement.gridBeats);
+  const [timeSignature, setTimeSignature] = useState<TimeSignature>(initialArrangement.timeSignature);
+  const [noteDurationBeats, setNoteDurationBeats] = useState<number>(0.5);
   const [harmonySlots, setHarmonySlots] = useState<HarmonySlot[]>(() =>
-    generateHarmonyGrid(melodyNotes, initialArrangement.harmonySlots, initialArrangement.gridBeats)
+    generateHarmonyGrid(
+      melodyNotes,
+      initialArrangement.harmonySlots,
+      initialArrangement.gridBeats,
+      initialArrangement.timeSignature,
+      beatsPerBar(initialArrangement.timeSignature) * MIN_TRACK_BARS
+    )
   );
   const [selectedChord, setSelectedChord] = useState<CircleChord>(CIRCLE_CHORDS[0]);
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(harmonySlots[0]?.id ?? null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [isRecording, setIsRecording] = useState(false);
-  const [octaveOffset, setOctaveOffset] = useState(0);
-  const [activeMidi, setActiveMidi] = useState<number | null>(null);
   const [visitorCounter, setVisitorCounter] = useState<VisitorCounterResult>({
     status: "loading",
     label: "Visits loading",
     count: null
   });
-  const recorderRef = useRef<MelodyRecorderState | null>(null);
   const modePlan = useMemo(() => buildModePlan(tonic, mode), [mode, tonic]);
   const modeChordIds = useMemo(
     () => new Set(modePlan.chords.map((chord) => chord.circleChord.id)),
@@ -715,85 +797,20 @@ export default function App() {
   }, [melodyNotes]);
 
   useEffect(() => {
-    saveArrangementState({ gridBeats, harmonySlots });
-  }, [gridBeats, harmonySlots]);
+    saveArrangementState({ gridBeats, timeSignature, harmonySlots });
+  }, [gridBeats, harmonySlots, timeSignature]);
 
   useEffect(() => {
-    setHarmonySlots((slots) => generateHarmonyGrid(melodyNotes, slots, gridBeats));
-  }, [melodyNotes, gridBeats]);
+    setHarmonySlots((slots) =>
+      generateHarmonyGrid(melodyNotes, slots, gridBeats, timeSignature, beatsPerBar(timeSignature) * MIN_TRACK_BARS)
+    );
+  }, [melodyNotes, gridBeats, timeSignature]);
 
   useEffect(() => {
     void hitVisitorCounter(window.location.hostname).then(setVisitorCounter);
   }, []);
 
   useEffect(() => () => stopPlayback(), []);
-
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (interactionMode !== "compose" || isEditableTarget(event.target)) {
-        return;
-      }
-
-      const key = normalizeKeyboardKey(event.key);
-
-      if (key === "z" || key === "x") {
-        event.preventDefault();
-        const direction = key === "z" ? -1 : 1;
-
-        setOctaveOffset((current) => {
-          const next = Math.max(-2, Math.min(2, current + direction));
-
-          if (recorderRef.current) {
-            recorderRef.current = { ...recorderRef.current, octaveOffset: next };
-          }
-
-          return next;
-        });
-        return;
-      }
-
-      if (!isRecording || !recorderRef.current || event.repeat) {
-        return;
-      }
-
-      if (midiForKeyboardKey(key, recorderRef.current.octaveOffset) === null) {
-        return;
-      }
-
-      event.preventDefault();
-      const result = handleMelodyKeyDown(recorderRef.current, key, performance.now());
-      recorderRef.current = result.state;
-      setActiveMidi(result.state.currentNote?.midi ?? null);
-
-      if (result.previewMidi !== null) {
-        playMelodyNotePreview(result.previewMidi, playbackSettings);
-      }
-    }
-
-    function handleKeyUp(event: KeyboardEvent) {
-      if (!isRecording || !recorderRef.current || isEditableTarget(event.target)) {
-        return;
-      }
-
-      const key = normalizeKeyboardKey(event.key);
-
-      if (midiForKeyboardKey(key, recorderRef.current.octaveOffset) === null) {
-        return;
-      }
-
-      event.preventDefault();
-      recorderRef.current = handleMelodyKeyUp(recorderRef.current, key, performance.now());
-      setActiveMidi(recorderRef.current.currentNote?.midi ?? null);
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("keyup", handleKeyUp);
-
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-      window.removeEventListener("keyup", handleKeyUp);
-    };
-  }, [interactionMode, isRecording, playbackSettings]);
 
   function updatePlaybackSettings(nextSettings: PlaybackSettings) {
     const shouldRevoice =
@@ -809,7 +826,7 @@ export default function App() {
   function handleSelectChord(chord: CircleChord) {
     setSelectedChord(chord);
     setIsPlaying(false);
-    playChordPreview(chord, playbackSettings);
+    playChordPreview(chord, playbackSettings, undefined, timeSignature);
 
     if (interactionMode === "compose") {
       const result = assignChordToSelectedOrNextEmpty(
@@ -817,7 +834,8 @@ export default function App() {
         selectedSlotId,
         chord,
         playbackSettings,
-        gridBeats
+        gridBeats,
+        timeSignature
       );
       setHarmonySlots(result.slots);
       setSelectedSlotId(result.selectedSlotId);
@@ -832,30 +850,9 @@ export default function App() {
 
       if (chord) {
         setSelectedChord(chord);
-        playChordPreview(chord, playbackSettings, slot.voicingMidi ?? undefined);
+        playChordPreview(chord, playbackSettings, slot.voicingMidi ?? undefined, timeSignature);
       }
     }
-  }
-
-  function handleRecordToggle() {
-    if (isRecording && recorderRef.current) {
-      const notes = finishMelodyRecording(recorderRef.current, performance.now(), playbackSettings.tempoBpm);
-      recorderRef.current = null;
-      setIsRecording(false);
-      setActiveMidi(null);
-      setMelodyNotes(notes);
-      setHarmonySlots((slots) => generateHarmonyGrid(notes, slots, gridBeats));
-      return;
-    }
-
-    stopPlayback();
-    setIsPlaying(false);
-    setInteractionMode("compose");
-    setMelodyNotes([]);
-    setActiveMidi(null);
-    recorderRef.current = createMelodyRecorderState(performance.now(), octaveOffset);
-    setIsRecording(true);
-    (document.activeElement as HTMLElement | null)?.blur();
   }
 
   function handlePlayToggle() {
@@ -870,13 +867,55 @@ export default function App() {
     }
 
     setIsPlaying(true);
-    playArrangement(melodyNotes, harmonySlots, playbackSettings, () => setIsPlaying(false));
+    playArrangement(melodyNotes, harmonySlots, playbackSettings, timeSignature, () => setIsPlaying(false));
   }
 
   function handleGridChange(nextGridBeats: HarmonyGridBeats) {
     setGridBeats(nextGridBeats);
-    setHarmonySlots((slots) => generateHarmonyGrid(melodyNotes, slots, nextGridBeats));
+    setHarmonySlots((slots) =>
+      generateHarmonyGrid(melodyNotes, slots, nextGridBeats, timeSignature, beatsPerBar(timeSignature) * MIN_TRACK_BARS)
+    );
     setSelectedSlotId(null);
+  }
+
+  function handleTimeSignatureChange(nextTimeSignature: TimeSignature) {
+    const currentBarBeats = beatsPerBar(timeSignature);
+    const nextBarBeats = beatsPerBar(nextTimeSignature);
+
+    if (isPlaying) {
+      stopPlayback();
+      setIsPlaying(false);
+    }
+
+    setTimeSignature(nextTimeSignature);
+    setNoteDurationBeats((duration) => (duration === currentBarBeats ? nextBarBeats : duration));
+    setHarmonySlots((slots) => {
+      const nextSlotDuration = gridDurationBeats(gridBeats, nextTimeSignature);
+      const realignedSlots = slots.map((slot, index) => ({
+        ...slot,
+        startBeat: index * nextSlotDuration,
+        durationBeats: nextSlotDuration
+      }));
+
+      return generateHarmonyGrid(melodyNotes, realignedSlots, gridBeats, nextTimeSignature, nextBarBeats * MIN_TRACK_BARS);
+    });
+    setSelectedSlotId(null);
+  }
+
+  function handleAddMeasure() {
+    setInteractionMode("compose");
+    setHarmonySlots((slots) => {
+      const measureBeats = beatsPerBar(timeSignature);
+      const currentBeats = Math.max(measureBeats * MIN_TRACK_BARS, Math.ceil(arrangementEndBeat(melodyNotes, slots)));
+
+      return generateHarmonyGrid(melodyNotes, slots, gridBeats, timeSignature, currentBeats + measureBeats);
+    });
+  }
+
+  function handleToggleMelodyNote(midi: number, startBeat: number) {
+    setInteractionMode("compose");
+    setMelodyNotes((notes) => toggleGridMelodyNote(notes, midi, startBeat, noteDurationBeats));
+    playMelodyNotePreview(midi, playbackSettings);
   }
 
   function handleRemoveChord(slotId: string) {
@@ -889,9 +928,6 @@ export default function App() {
 
   function handleClearMelody() {
     setMelodyNotes([]);
-    recorderRef.current = null;
-    setIsRecording(false);
-    setActiveMidi(null);
   }
 
   function handleClearHarmony() {
@@ -903,11 +939,8 @@ export default function App() {
     stopPlayback();
     setIsPlaying(false);
     setMelodyNotes([]);
-    setHarmonySlots(generateHarmonyGrid([], [], gridBeats));
+    setHarmonySlots(generateHarmonyGrid([], [], gridBeats, timeSignature, beatsPerBar(timeSignature) * MIN_TRACK_BARS));
     setSelectedSlotId(null);
-    recorderRef.current = null;
-    setIsRecording(false);
-    setActiveMidi(null);
   }
 
   return (
@@ -920,32 +953,36 @@ export default function App() {
         <ModeSwitch mode={interactionMode} onModeChange={setInteractionMode} />
       </header>
       <div className="workspace">
-        <div className="main-stack">
+        <div className={`main-stack is-${interactionMode}`}>
+          <div className="arrangement-shell" aria-hidden={interactionMode !== "compose"}>
+            <ArrangementTimeline
+              gridBeats={gridBeats}
+              harmonySlots={harmonySlots}
+              isPlaying={isPlaying}
+              melodyNotes={melodyNotes}
+              modePlan={modePlan}
+              noteDurationBeats={noteDurationBeats}
+              onAddMeasure={handleAddMeasure}
+              onClearAll={handleClearAll}
+              onClearHarmony={handleClearHarmony}
+              onClearMelody={handleClearMelody}
+              onGridChange={handleGridChange}
+              onMoveChord={handleMoveChord}
+              onNoteDurationChange={setNoteDurationBeats}
+              onPlayToggle={handlePlayToggle}
+              onRemoveChord={handleRemoveChord}
+              onSelectSlot={handleSelectSlot}
+              onTimeSignatureChange={handleTimeSignatureChange}
+              onToggleMelodyNote={handleToggleMelodyNote}
+              selectedSlotId={selectedSlotId}
+              timeSignature={timeSignature}
+            />
+          </div>
           <CircleOfFifths
             selectedChord={selectedChord}
             modeChordIds={modeChordIds}
             modeChords={modeChords}
             onSelectChord={handleSelectChord}
-          />
-          <ArrangementTimeline
-            activeMidi={activeMidi}
-            gridBeats={gridBeats}
-            harmonySlots={harmonySlots}
-            isPlaying={isPlaying}
-            isRecording={isRecording}
-            melodyNotes={melodyNotes}
-            modePlan={modePlan}
-            octaveOffset={octaveOffset}
-            onClearAll={handleClearAll}
-            onClearHarmony={handleClearHarmony}
-            onClearMelody={handleClearMelody}
-            onGridChange={handleGridChange}
-            onMoveChord={handleMoveChord}
-            onPlayToggle={handlePlayToggle}
-            onRecordToggle={handleRecordToggle}
-            onRemoveChord={handleRemoveChord}
-            onSelectSlot={handleSelectSlot}
-            selectedSlotId={selectedSlotId}
           />
         </div>
         <DetailPanel
